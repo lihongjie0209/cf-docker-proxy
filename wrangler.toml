@@ -5,3 +5,11 @@ compatibility_date = "2024-07-25"
 [[routes]]
 pattern = "dh.lihongjie.cn/*"
 zone_name = "lihongjie.cn"
+
+[[routes]]
+pattern = "dh.backend.lihongjie.cn/*"
+zone_name = "lihongjie.cn"
+
+[[routes]]
+pattern = "dh.cn.lihongjie.cn/*"
+zone_name = "lihongjie.cn"
