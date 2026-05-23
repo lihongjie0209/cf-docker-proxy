@@ -38,8 +38,9 @@ function buildResponseHeaders(incoming: Headers): Headers {
   for (const [k, v] of incoming) {
     if (!HOP_BY_HOP.has(k.toLowerCase())) out.set(k, v);
   }
-  // Let the runtime set content-length for streamed responses
-  out.delete("content-length");
+  // Unlike the GitHub proxy, Docker Registry v2 requires Content-Length for
+  // blob and manifest responses — the Docker daemon validates sizes against it.
+  // We intentionally keep content-length here.
   return out;
 }
 
