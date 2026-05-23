@@ -1,0 +1,7 @@
+name = "cf-docker-proxy"
+main = "src/index.ts"
+compatibility_date = "2024-07-25"
+
+[[routes]]
+pattern = "dh.lihongjie.cn/*"
+zone_name = "lihongjie.cn"
