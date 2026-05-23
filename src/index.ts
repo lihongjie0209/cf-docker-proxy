@@ -76,6 +76,7 @@ async function proxyRequest(
   request: Request,
   targetUrl: string,
   proxyOrigin: string,
+  followRedirects = true,
 ): Promise<Response> {
   const reqHeaders = buildRequestHeaders(request.headers);
 
@@ -86,6 +87,10 @@ async function proxyRequest(
     body: ["GET", "HEAD"].includes(request.method) ? null : request.body,
     // @ts-ignore — Workers-specific duplex hint for streaming bodies
     duplex: "half",
+    // For blob GETs we pass redirects through to the Docker client so it
+    // fetches directly from the CDN. This avoids CF stripping Content-Length
+    // when re-encoding chunked responses from the CDN.
+    redirect: followRedirects ? "follow" : "manual",
   });
 
   let upstream: Response;
@@ -202,7 +207,18 @@ export default {
 
     // Registry API — all /v2/* paths
     if (pathname.startsWith("/v2/") || pathname === "/v2") {
-      return proxyRequest(request, `${REGISTRY}${pathname}${search}`, proxyOrigin);
+      // Blob GET/HEAD: pass 307 redirects directly to the Docker client so it
+      // fetches from the CDN itself. This prevents CF from stripping
+      // Content-Length when it re-encodes the CDN's chunked response.
+      const isBlobFetch =
+        request.method === "GET" &&
+        /\/v2\/.+\/blobs\/sha256:[0-9a-f]+$/.test(pathname);
+      return proxyRequest(
+        request,
+        `${REGISTRY}${pathname}${search}`,
+        proxyOrigin,
+        !isBlobFetch,
+      );
     }
 
     return new Response("Not Found", { status: 404 });
