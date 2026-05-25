@@ -124,67 +124,193 @@ async function proxyRequest(
 }
 
 function landingPage(origin: string): Response {
+  const host = origin.replace(/^https?:\/\//, '');
   const html = `<!DOCTYPE html>
-<html lang="zh">
+<html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Docker Hub 镜像代理</title>
 <style>
-  body{font-family:system-ui,sans-serif;max-width:720px;margin:60px auto;padding:0 20px;color:#222}
-  h1{font-size:1.8rem;margin-bottom:.3em}
-  .badge{display:inline-block;background:#0db7ed;color:#fff;font-size:.75rem;padding:2px 8px;border-radius:4px;margin-left:8px;vertical-align:middle}
-  code,pre{background:#f4f4f4;border-radius:4px;font-size:.9em}
-  code{padding:1px 5px}
-  pre{padding:12px 16px;overflow-x:auto}
-  .card{border:1px solid #e0e0e0;border-radius:8px;padding:20px;margin:16px 0}
-  .note{color:#666;font-size:.9em}
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0d1117; --surface: #161b22; --card: #21262d; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --yellow: #e3b341; --radius: 8px;
+  }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; min-height: 100vh; padding: 2rem 1rem; }
+  .container { max-width: 800px; margin: 0 auto; }
+  header { text-align: center; padding: 2rem 0 2.5rem; }
+  header h1 { font-size: 2rem; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: .6rem; }
+  header p { color: var(--muted); margin-top: .6rem; font-size: .95rem; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.5rem; margin-bottom: 1.5rem; }
+  .card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 1rem; color: var(--accent); }
+
+  .btn {
+    background: var(--accent); color: #000; border: none; border-radius: 6px;
+    padding: .6rem 1.1rem; font-size: .875rem; font-weight: 600; cursor: pointer;
+    transition: opacity .15s; white-space: nowrap;
+  }
+  .btn:hover { opacity: .85; }
+  .btn.sm { padding: .35rem .75rem; font-size: .8rem; }
+  .btn.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .btn.ghost:hover { color: var(--accent); border-color: var(--accent); opacity: 1; }
+
+  /* Steps */
+  .steps { display: flex; flex-direction: column; gap: .75rem; }
+  .step { display: flex; gap: .75rem; }
+  .step-num {
+    width: 22px; height: 22px; border-radius: 50%; background: rgba(88,166,255,.2);
+    color: var(--accent); font-size: .75rem; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 2px;
+  }
+  .step-body { flex: 1; }
+  .step-body p { font-size: .875rem; color: var(--muted); margin-bottom: .4rem; }
+  .code-block {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: .65rem .9rem; font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: .82rem; color: var(--text); display: flex; gap: .5rem; align-items: flex-start;
+  }
+  .code-block pre { flex: 1; margin: 0; white-space: pre-wrap; word-break: break-all; color: var(--green); }
+  .note { font-size: .78rem; color: var(--muted); margin-top: .4rem; }
+  .copied-flash { font-size: .75rem; color: var(--green); opacity: 0; transition: opacity .3s; white-space: nowrap; }
+  .copied-flash.show { opacity: 1; }
+
+  /* Route table */
+  table { width: 100%; border-collapse: collapse; font-size: .875rem; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: .5rem .75rem; border-bottom: 1px solid var(--border); }
+  td { padding: .55rem .75rem; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  code { background: rgba(110,118,129,.15); border-radius: 4px; padding: .15em .45em; font-family: "SFMono-Regular", Consolas, monospace; font-size: .85em; }
+
+  footer { text-align: center; color: var(--muted); font-size: .8rem; padding: 2rem 0 1rem; }
+  footer a { color: var(--accent); text-decoration: none; }
 </style>
 </head>
 <body>
-<h1>Docker Hub 镜像代理 <span class="badge">Cloudflare Workers</span></h1>
-<p class="note">加速访问 Docker Hub，支持 pull / push / 认证 / API</p>
+<div class="container">
+  <header>
+    <h1>🐋 Docker Hub 镜像代理</h1>
+    <p>基于 Cloudflare Workers &nbsp;·&nbsp; 支持 pull / push · 认证 · Registry API</p>
+    <div style="display:flex;gap:.75rem;flex-wrap:wrap;justify-content:center;margin-top:.75rem;font-size:.85rem;">
+      <span style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.3rem .75rem;">🌐 国际线路：<code>dh.lihongjie.cn</code></span>
+      <span style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.3rem .75rem;">🇨🇳 国内优选：<code>dh.cn.lihongjie.cn</code></span>
+    </div>
+  </header>
 
-<div class="card">
-  <h3>🚀 快速使用</h3>
-  <pre># 拉取镜像（替换默认 registry）
-docker pull ${origin.replace(/^https?:\/\//, '')}/library/nginx:latest
-docker pull ${origin.replace(/^https?:\/\//, '')}/library/ubuntu:22.04
+  <!-- Quick Pull -->
+  <div class="card">
+    <h2>🚀 快速拉取</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <p>直接在镜像名前加上代理域名：</p>
+          <div class="code-block">
+            <pre>docker pull ${host}/library/nginx:latest
+docker pull ${host}/library/ubuntu:22.04
+docker pull ${host}/username/image:tag</pre>
+            <button class="btn sm ghost" onclick="copyBlock(this)">复制</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
-# 带用户名的镜像
-docker pull ${origin.replace(/^https?:\/\//, '')}/username/image:tag</pre>
-</div>
-
-<div class="card">
-  <h3>⚙️ 配置为默认镜像源</h3>
-  <p>编辑 <code>/etc/docker/daemon.json</code>：</p>
-  <pre>{
+  <!-- daemon.json -->
+  <div class="card">
+    <h2>⚙️ 配置为默认镜像源</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <p>编辑 <code>/etc/docker/daemon.json</code>，添加镜像源：</p>
+          <div class="code-block">
+            <pre>{
   "registry-mirrors": ["${origin}"]
 }</pre>
-  <p>然后重启 Docker：<code>sudo systemctl restart docker</code></p>
-  <p>之后直接使用标准命令，无需修改镜像名：</p>
-  <pre>docker pull nginx:latest
+            <button class="btn sm ghost" onclick="copyBlock(this)">复制</button>
+          </div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <p>重启 Docker 使配置生效：</p>
+          <div class="code-block">
+            <pre>sudo systemctl restart docker</pre>
+            <button class="btn sm ghost" onclick="copyBlock(this)">复制</button>
+          </div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <p>之后直接使用标准命令，无需修改镜像名：</p>
+          <div class="code-block">
+            <pre>docker pull nginx:latest
 docker pull ubuntu:22.04</pre>
+            <button class="btn sm ghost" onclick="copyBlock(this)">复制</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Push -->
+  <div class="card">
+    <h2>🔐 推送镜像</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <p>使用 Docker Hub 账号登录代理：</p>
+          <div class="code-block">
+            <pre>docker login ${host}</pre>
+            <button class="btn sm ghost" onclick="copyBlock(this)">复制</button>
+          </div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <p>打 tag 并推送：</p>
+          <div class="code-block">
+            <pre>docker tag myimage:latest ${host}/username/myimage:latest
+docker push ${host}/username/myimage:latest</pre>
+            <button class="btn sm ghost" onclick="copyBlock(this)">复制</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Route table -->
+  <div class="card">
+    <h2>📡 代理端点</h2>
+    <table>
+      <thead><tr><th>路径</th><th>目标</th><th>用途</th></tr></thead>
+      <tbody>
+        <tr><td><code>/token</code></td><td><code>auth.docker.io/token</code></td><td>OAuth 2 认证</td></tr>
+        <tr><td><code>/v2/*</code></td><td><code>registry-1.docker.io/v2/*</code></td><td>Registry API（pull / push / tags）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>Powered by <a href="https://workers.cloudflare.com" target="_blank">Cloudflare Workers</a></footer>
 </div>
 
-<div class="card">
-  <h3>🔐 推送镜像</h3>
-  <pre># 登录到代理（使用 Docker Hub 账号）
-docker login ${origin.replace(/^https?:\/\//, '')}
-
-# 打 tag 并推送
-docker tag myimage:latest ${origin.replace(/^https?:\/\//, '')}/username/myimage:latest
-docker push ${origin.replace(/^https?:\/\//, '')}/username/myimage:latest</pre>
-</div>
-
-<div class="card">
-  <h3>📡 代理端点</h3>
-  <table style="width:100%;border-collapse:collapse;font-size:.9em">
-    <tr><th style="text-align:left;padding:6px 0;border-bottom:1px solid #eee">路径</th><th style="text-align:left;padding:6px 0;border-bottom:1px solid #eee">目标</th></tr>
-    <tr><td><code>/token</code></td><td>auth.docker.io/token（认证）</td></tr>
-    <tr><td><code>/v2/*</code></td><td>registry-1.docker.io/v2/*（Registry API）</td></tr>
-  </table>
-</div>
+<script>
+function copyBlock(btn) {
+  const pre = btn.closest('.code-block').querySelector('pre');
+  navigator.clipboard.writeText(pre.textContent.trim()).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '已复制';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  });
+}
+</script>
 </body>
 </html>`;
   return new Response(html, {
