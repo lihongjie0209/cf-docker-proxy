@@ -446,22 +446,9 @@ export default {
 
     // Registry API — /v2/* paths
     if (pathname.startsWith("/v2/") || pathname === "/v2") {
-      const afterV2 = pathname.slice(4); // strip leading /v2/
-
-      // Bare /v2/ version check: return 200 directly.
-      // Proxying to a specific upstream would cause Docker to obtain an upstream-
-      // specific token preemptively for this host. That token would then be sent
-      // (wrongly) when Docker pulls images from a different registry via the same
-      // proxy, resulting in "invalid token" errors from the actual upstream.
-      if (!afterV2) {
-        return new Response("{}", {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-
       // Extract potential registry prefix from the path segment after /v2/
       // e.g. /v2/ghcr.io/astral-sh/uv/manifests/latest → prefix=ghcr.io, rest=astral-sh/uv/manifests/latest
+      const afterV2 = pathname.slice(4); // strip leading /v2/
       const [registryPrefix, remainingPath] = extractRegistryPrefix(afterV2);
       const cfg = REGISTRY_CONFIG[registryPrefix]!;
       const upstreamPath = remainingPath ? `/v2/${remainingPath}` : "/v2";
