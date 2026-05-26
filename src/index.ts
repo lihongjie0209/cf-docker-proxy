@@ -1,93 +1,23 @@
 /**
- * Multi-Registry Docker Proxy Worker
+ * Docker Hub Proxy Worker
  *
- * Registry routing via subdirectory prefix:
- *   /docker.io/<name>/...      → registry-1.docker.io  (default, backward compat)
- *   /ghcr.io/<name>/...        → ghcr.io
- *   /quay.io/<name>/...        → quay.io
- *   /gcr.io/<name>/...         → gcr.io
- *   /registry.k8s.io/<name>/...→ registry.k8s.io
- *   /mcr.microsoft.com/<name>/ → mcr.microsoft.com
- *   /docker.elastic.co/<name>/ → docker.elastic.co
- *   /nvcr.io/<name>/...        → nvcr.io
- *
- * API endpoints:
- *   /<prefix>/token            → upstream auth token endpoint
- *   /token                     → Docker Hub auth (backward compat)
- *   /v2/<prefix>/<name>/...    → upstream registry API
- *   /v2/<name>/...             → Docker Hub registry API (backward compat)
+ * Supported scenarios:
+ *   /token           → auth.docker.io/token   (OAuth 2 token endpoint)
+ *   /v2/             → registry-1.docker.io/v2/  (API version check → 401 + WWW-Authenticate)
+ *   /v2/<name>/manifests/<ref>   → pull/push image manifest
+ *   /v2/<name>/blobs/<digest>    → pull blob (layer)
+ *   /v2/<name>/blobs/uploads/    → initiate blob push
+ *   /v2/<name>/tags/list         → list tags
+ *   ... all other /v2/* Registry API paths
  *
  * Key behaviours:
- *   - WWW-Authenticate realm is rewritten to point to this proxy's token endpoint
- *   - Registry prefix is stripped from token scope before forwarding to upstream auth
+ *   - WWW-Authenticate realm is rewritten to point to this proxy's /token endpoint
  *   - Location headers from blob upload redirects are rewritten to stay on-proxy
  *   - Hop-by-hop headers are stripped to avoid HTTP/2 protocol errors
  */
 
-interface RegistryConfig {
-  registry: string;
-  auth: string;
-  authPath: string;
-}
-
-const REGISTRY_CONFIG: Record<string, RegistryConfig> = {
-  "docker.io": {
-    registry: "https://registry-1.docker.io",
-    auth: "https://auth.docker.io",
-    authPath: "/token",
-  },
-  "ghcr.io": {
-    registry: "https://ghcr.io",
-    auth: "https://ghcr.io",
-    authPath: "/token",
-  },
-  "quay.io": {
-    registry: "https://quay.io",
-    auth: "https://quay.io",
-    authPath: "/v2/auth",
-  },
-  "gcr.io": {
-    registry: "https://gcr.io",
-    auth: "https://gcr.io",
-    authPath: "/v2/token",
-  },
-  "registry.k8s.io": {
-    registry: "https://registry.k8s.io",
-    auth: "https://registry.k8s.io",
-    authPath: "/v2/token",
-  },
-  "mcr.microsoft.com": {
-    registry: "https://mcr.microsoft.com",
-    auth: "https://mcr.microsoft.com",
-    authPath: "/v2/token",
-  },
-  "docker.elastic.co": {
-    registry: "https://docker.elastic.co",
-    auth: "https://docker.elastic.co",
-    authPath: "/v2/token",
-  },
-  "nvcr.io": {
-    registry: "https://nvcr.io",
-    auth: "https://authn.nvidia.com",
-    authPath: "/token",
-  },
-};
-
-const DEFAULT_REGISTRY = "docker.io";
-
-/**
- * Extract a known registry prefix from the beginning of an image path.
- * Returns [prefix, remainingPath] or [DEFAULT_REGISTRY, originalPath] if no prefix found.
- */
-function extractRegistryPrefix(imagePath: string): [string, string] {
-  for (const prefix of Object.keys(REGISTRY_CONFIG)) {
-    if (imagePath === prefix || imagePath.startsWith(prefix + "/")) {
-      const remaining = imagePath.slice(prefix.length).replace(/^\//, "");
-      return [prefix, remaining];
-    }
-  }
-  return [DEFAULT_REGISTRY, imagePath];
-}
+const REGISTRY = "https://registry-1.docker.io";
+const AUTH     = "https://auth.docker.io";
 
 const HOP_BY_HOP = new Set([
   "host", "connection", "keep-alive", "proxy-authenticate",
@@ -116,48 +46,36 @@ function buildResponseHeaders(incoming: Headers): Headers {
 
 /**
  * Rewrite the realm inside a WWW-Authenticate Bearer challenge so the Docker
- * client fetches tokens from our proxy instead of the upstream auth server.
+ * client fetches tokens from our proxy instead of auth.docker.io directly.
  *
  * Original: Bearer realm="https://auth.docker.io/token",service="registry.docker.io"
- * Rewritten: Bearer realm="https://dh.lihongjie.cn/docker.io/token",service="registry.docker.io"
+ * Rewritten: Bearer realm="https://dh.lihongjie.cn/token",service="registry.docker.io"
  */
-function rewriteWWWAuthenticate(header: string, proxyOrigin: string, registryPrefix: string): string {
+function rewriteWWWAuthenticate(header: string, proxyOrigin: string): string {
   return header.replace(
-    /realm="https?:\/\/[^"]+"/,
-    `realm="${proxyOrigin}/${registryPrefix}/token"`,
+    /realm="https:\/\/auth\.docker\.io(\/[^"]*)"/,
+    `realm="${proxyOrigin}/token"`,
   );
 }
 
 /**
  * Rewrite Location headers produced by blob upload redirects.
- * Replaces any upstream registry/auth origin with the proxy origin.
+ * Docker issues PATCH/PUT to a UUID URL that may live on registry-1.docker.io.
  */
-function rewriteLocation(location: string, proxyOrigin: string, cfg: RegistryConfig): string {
-  for (const base of [cfg.registry, cfg.auth]) {
-    if (location.startsWith(base + "/") || location === base) {
-      return proxyOrigin + location.slice(base.length);
-    }
+function rewriteLocation(location: string, proxyOrigin: string): string {
+  if (location.startsWith(`${REGISTRY}/`)) {
+    return proxyOrigin + location.slice(REGISTRY.length);
+  }
+  if (location.startsWith(`${AUTH}/`)) {
+    return proxyOrigin + location.slice(AUTH.length);
   }
   return location;
-}
-
-/**
- * Strip the registry prefix from a token scope parameter.
- * e.g. scope=repository:ghcr.io/astral-sh/uv:pull → scope=repository:astral-sh/uv:pull
- */
-function stripScopePrefix(scope: string, registryPrefix: string): string {
-  const escaped = registryPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return scope.replace(
-    new RegExp(`(repository:)${escaped}\\/`, "g"),
-    "$1",
-  );
 }
 
 async function proxyRequest(
   request: Request,
   targetUrl: string,
   proxyOrigin: string,
-  registryPrefix: string,
 ): Promise<Response> {
   const reqHeaders = buildRequestHeaders(request.headers);
 
@@ -177,7 +95,6 @@ async function proxyRequest(
     return new Response(`Upstream fetch failed: ${err}`, { status: 502 });
   }
 
-  const cfg = REGISTRY_CONFIG[registryPrefix]!;
   const respHeaders = buildResponseHeaders(upstream.headers);
 
   // Docker daemon requires Content-Length for blob downloads. CF Workers may
@@ -191,12 +108,12 @@ async function proxyRequest(
 
   const wwwAuth = upstream.headers.get("www-authenticate");
   if (wwwAuth) {
-    respHeaders.set("www-authenticate", rewriteWWWAuthenticate(wwwAuth, proxyOrigin, registryPrefix));
+    respHeaders.set("www-authenticate", rewriteWWWAuthenticate(wwwAuth, proxyOrigin));
   }
 
   const location = upstream.headers.get("location");
   if (location) {
-    respHeaders.set("location", rewriteLocation(location, proxyOrigin, cfg));
+    respHeaders.set("location", rewriteLocation(location, proxyOrigin));
   }
 
   return new Response(upstream.body, {
@@ -208,24 +125,12 @@ async function proxyRequest(
 
 function landingPage(origin: string): Response {
   const host = origin.replace(/^https?:\/\//, '');
-  const registryRows = [
-    ["Docker Hub 官方镜像", `${host}/docker.io/library/nginx:latest`],
-    ["Docker Hub 用户镜像", `${host}/docker.io/username/image:tag`],
-    ["GHCR", `${host}/ghcr.io/astral-sh/uv:latest`],
-    ["Quay", `${host}/quay.io/prometheus/node-exporter:latest`],
-    ["GCR", `${host}/gcr.io/distroless/static-debian13`],
-    ["Kubernetes Registry", `${host}/registry.k8s.io/pause:latest`],
-    ["MCR", `${host}/mcr.microsoft.com/playwright/mcp:latest`],
-    ["Elastic", `${host}/docker.elastic.co/elasticsearch/elasticsearch:9.4.1`],
-    ["NVIDIA", `${host}/nvcr.io/nvidia/k8s/dcgm-exporter:4.5.3-4.8.2-distroless`],
-  ].map(([src, ref]) => `<tr><td>${src}</td><td><code>${ref}</code></td></tr>`).join("\n        ");
-
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Docker 镜像代理</title>
+<title>Docker Hub 镜像代理</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -234,7 +139,7 @@ function landingPage(origin: string): Response {
     --green: #3fb950; --yellow: #e3b341; --radius: 8px;
   }
   body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; min-height: 100vh; padding: 2rem 1rem; }
-  .container { max-width: 860px; margin: 0 auto; }
+  .container { max-width: 800px; margin: 0 auto; }
   header { text-align: center; padding: 2rem 0 2.5rem; }
   header h1 { font-size: 2rem; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: .6rem; }
   header p { color: var(--muted); margin-top: .6rem; font-size: .95rem; }
@@ -252,6 +157,7 @@ function landingPage(origin: string): Response {
   .btn.ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
   .btn.ghost:hover { color: var(--accent); border-color: var(--accent); opacity: 1; }
 
+  /* Steps */
   .steps { display: flex; flex-direction: column; gap: .75rem; }
   .step { display: flex; gap: .75rem; }
   .step-num {
@@ -267,12 +173,16 @@ function landingPage(origin: string): Response {
     font-size: .82rem; color: var(--text); display: flex; gap: .5rem; align-items: flex-start;
   }
   .code-block pre { flex: 1; margin: 0; white-space: pre-wrap; word-break: break-all; color: var(--green); }
+  .note { font-size: .78rem; color: var(--muted); margin-top: .4rem; }
+  .copied-flash { font-size: .75rem; color: var(--green); opacity: 0; transition: opacity .3s; white-space: nowrap; }
+  .copied-flash.show { opacity: 1; }
 
+  /* Route table */
   table { width: 100%; border-collapse: collapse; font-size: .875rem; }
   th { text-align: left; color: var(--muted); font-weight: 500; padding: .5rem .75rem; border-bottom: 1px solid var(--border); }
-  td { padding: .55rem .75rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  td { padding: .55rem .75rem; border-bottom: 1px solid var(--border); }
   tr:last-child td { border-bottom: none; }
-  code { background: rgba(110,118,129,.15); border-radius: 4px; padding: .15em .45em; font-family: "SFMono-Regular", Consolas, monospace; font-size: .85em; word-break: break-all; }
+  code { background: rgba(110,118,129,.15); border-radius: 4px; padding: .15em .45em; font-family: "SFMono-Regular", Consolas, monospace; font-size: .85em; }
 
   footer { text-align: center; color: var(--muted); font-size: .8rem; padding: 2rem 0 1rem; }
   footer a { color: var(--accent); text-decoration: none; }
@@ -281,24 +191,13 @@ function landingPage(origin: string): Response {
 <body>
 <div class="container">
   <header>
-    <h1>🐋 Docker 镜像代理</h1>
-    <p>基于 Cloudflare Workers &nbsp;·&nbsp; 支持多仓库 · pull / push · 认证 · Registry API</p>
+    <h1>🐋 Docker Hub 镜像代理</h1>
+    <p>基于 Cloudflare Workers &nbsp;·&nbsp; 支持 pull / push · 认证 · Registry API</p>
     <div style="display:flex;gap:.75rem;flex-wrap:wrap;justify-content:center;margin-top:.75rem;font-size:.85rem;">
       <span style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.3rem .75rem;">🌐 国际线路：<code>dh.lihongjie.cn</code></span>
       <span style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:.3rem .75rem;">🇨🇳 国内优选：<code>dh.cn.lihongjie.cn</code></span>
     </div>
   </header>
-
-  <!-- Supported Registries -->
-  <div class="card">
-    <h2>📦 支持的镜像仓库</h2>
-    <table>
-      <thead><tr><th>来源</th><th>镜像引用示例</th></tr></thead>
-      <tbody>
-        ${registryRows}
-      </tbody>
-    </table>
-  </div>
 
   <!-- Quick Pull -->
   <div class="card">
@@ -307,12 +206,11 @@ function landingPage(origin: string): Response {
       <div class="step">
         <div class="step-num">1</div>
         <div class="step-body">
-          <p>在镜像名前加上代理域名和仓库前缀（默认 docker.io）：</p>
+          <p>直接在镜像名前加上代理域名：</p>
           <div class="code-block">
-            <pre>docker pull ${host}/docker.io/library/nginx:latest
-docker pull ${host}/ghcr.io/astral-sh/uv:latest
-docker pull ${host}/quay.io/prometheus/node-exporter:latest
-docker pull ${host}/registry.k8s.io/pause:latest</pre>
+            <pre>docker pull ${host}/library/nginx:latest
+docker pull ${host}/library/ubuntu:22.04
+docker pull ${host}/username/image:tag</pre>
             <button class="btn sm ghost" onclick="copyBlock(this)">复制</button>
           </div>
         </div>
@@ -320,9 +218,9 @@ docker pull ${host}/registry.k8s.io/pause:latest</pre>
     </div>
   </div>
 
-  <!-- daemon.json (Docker Hub only) -->
+  <!-- daemon.json -->
   <div class="card">
-    <h2>⚙️ 配置为 Docker Hub 默认镜像源</h2>
+    <h2>⚙️ 配置为默认镜像源</h2>
     <div class="steps">
       <div class="step">
         <div class="step-num">1</div>
@@ -362,7 +260,7 @@ docker pull ubuntu:22.04</pre>
 
   <!-- Push -->
   <div class="card">
-    <h2>🔐 推送镜像（Docker Hub）</h2>
+    <h2>🔐 推送镜像</h2>
     <div class="steps">
       <div class="step">
         <div class="step-num">1</div>
@@ -379,13 +277,25 @@ docker pull ubuntu:22.04</pre>
         <div class="step-body">
           <p>打 tag 并推送：</p>
           <div class="code-block">
-            <pre>docker tag myimage:latest ${host}/docker.io/username/myimage:latest
-docker push ${host}/docker.io/username/myimage:latest</pre>
+            <pre>docker tag myimage:latest ${host}/username/myimage:latest
+docker push ${host}/username/myimage:latest</pre>
             <button class="btn sm ghost" onclick="copyBlock(this)">复制</button>
           </div>
         </div>
       </div>
     </div>
+  </div>
+
+  <!-- Route table -->
+  <div class="card">
+    <h2>📡 代理端点</h2>
+    <table>
+      <thead><tr><th>路径</th><th>目标</th><th>用途</th></tr></thead>
+      <tbody>
+        <tr><td><code>/token</code></td><td><code>auth.docker.io/token</code></td><td>OAuth 2 认证</td></tr>
+        <tr><td><code>/v2/*</code></td><td><code>registry-1.docker.io/v2/*</code></td><td>Registry API（pull / push / tags）</td></tr>
+      </tbody>
+    </table>
   </div>
 
   <footer>Powered by <a href="https://workers.cloudflare.com" target="_blank">Cloudflare Workers</a></footer>
@@ -419,40 +329,15 @@ export default {
       return landingPage(proxyOrigin);
     }
 
-    // /<prefix>/token — registry-specific auth token proxy
-    // e.g. /docker.io/token, /ghcr.io/token, /registry.k8s.io/token
-    for (const prefix of Object.keys(REGISTRY_CONFIG)) {
-      const tokenPath = `/${prefix}/token`;
-      if (pathname === tokenPath) {
-        const cfg = REGISTRY_CONFIG[prefix]!;
-        // Strip the registry prefix from scope params so the upstream auth
-        // server receives scopes in its own namespace.
-        // e.g. scope=repository:ghcr.io/astral-sh/uv:pull → scope=repository:astral-sh/uv:pull
-        const params = new URLSearchParams(search.slice(1));
-        const rawScope = params.get("scope");
-        if (rawScope) {
-          params.set("scope", stripScopePrefix(rawScope, prefix));
-        }
-        const tokenSearch = params.toString() ? "?" + params.toString() : "";
-        return proxyRequest(request, `${cfg.auth}${cfg.authPath}${tokenSearch}`, proxyOrigin, prefix);
-      }
-    }
-
-    // /token — Docker Hub auth backward compat
+    // Docker token auth endpoint
+    // Docker sends: GET /token?service=registry.docker.io&scope=repository:...
     if (pathname === "/token") {
-      const cfg = REGISTRY_CONFIG[DEFAULT_REGISTRY]!;
-      return proxyRequest(request, `${cfg.auth}${cfg.authPath}${search}`, proxyOrigin, DEFAULT_REGISTRY);
+      return proxyRequest(request, `${AUTH}/token${search}`, proxyOrigin);
     }
 
-    // Registry API — /v2/* paths
+    // Registry API — all /v2/* paths
     if (pathname.startsWith("/v2/") || pathname === "/v2") {
-      // Extract potential registry prefix from the path segment after /v2/
-      // e.g. /v2/ghcr.io/astral-sh/uv/manifests/latest → prefix=ghcr.io, rest=astral-sh/uv/manifests/latest
-      const afterV2 = pathname.slice(4); // strip leading /v2/
-      const [registryPrefix, remainingPath] = extractRegistryPrefix(afterV2);
-      const cfg = REGISTRY_CONFIG[registryPrefix]!;
-      const upstreamPath = remainingPath ? `/v2/${remainingPath}` : "/v2";
-      return proxyRequest(request, `${cfg.registry}${upstreamPath}${search}`, proxyOrigin, registryPrefix);
+      return proxyRequest(request, `${REGISTRY}${pathname}${search}`, proxyOrigin);
     }
 
     return new Response("Not Found", { status: 404 });
